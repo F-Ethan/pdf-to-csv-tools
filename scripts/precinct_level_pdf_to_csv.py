@@ -23,7 +23,7 @@ from functools import partial
 """
 
 # Configuration
-in_development = False  # Set to True to process only the first 10 pages per PDF
+in_development = True  # Set to True to process only the first 10 pages per PDF
 multi_thread = True
 input_folder = "../input"  # Update to your folder path
 output_csv = "../output/Election_Results.csv"
@@ -42,7 +42,7 @@ current_file_count = None
 
 # Set up logging
 logging.basicConfig(
-    filename="logs/pdf_extraction.log",
+    filename="../logs/pdf_extraction.log",
     filemode="a",
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -128,8 +128,9 @@ for term in office_terms:
 date_pattern = re.compile(
     r"^(0[1-9]|1[0-2]|[1-9])\/([1-9]|0[1-9]|[12][0-9]|3[01])\/(19|20)\d{2}$"
 )
+date_month_pattern = re.compile(r"^.* — ([A-Z]+\s [0-9][0-9], [0-9][0-9][0-9][0-9])$", re.IGNORECASE)
 ballots_cast_pattern = re.compile(r"^(\d+)\s+of\s+(\d+)\s+=\s+\d+\.\d{2}%$")
-county_pattern = re.compile(r"^(.*?\s*County)$", re.IGNORECASE)
+county_pattern = re.compile(r"^(.*?\s*County)(.*)", re.IGNORECASE)
 # contest_pattern = re.compile(
 #     r"^(.*\b(City|Proposition|Town|Village|School|Representative|Governor|General|Public|Municipal Utility|Supreme|Clerk|Attorney|Court|Board|Judge|Commissioner|Member|Justice|Lieutenant|Comptroller|Railroad|Senator|Criminal|Family|Probate|Peace|Library|Council|Independent|Councilmember|Trustee|District|Place)\b.*|Comptroller of Public Accounts|Commissioner of the General Land Office|Commissioner of Agriculture|Councilmember|Precinct Chair,.*|County Constable,.*)$"
 #     )
@@ -138,21 +139,28 @@ county_pattern = re.compile(r"^(.*?\s*County)$", re.IGNORECASE)
 precinct_pattern = re.compile(
     r"^(\d{1,3}(?:,\d{3})*|\d+\s+-\s+\d{1,3}(?:,\d{3})*|\d+)\s+(\d{1,3}(?:,\d{3})*|\d+)\s+ballots cast"
 )
+
+#Match lines like: "1 456 of 1,234 registered voters = 98.76%"
 precinct_pattern_numeric = re.compile(
     r"^(\d+)\s+(\d{1,3}(?:,\d{3})*)\s+of\s+(\d{1,3}(?:,\d{3})*)\s+registered voters\s+=\s+(\d+\.\d{2})%$"
 )
-# Match lines like: "123 456 of 1,234 registered voters = 98.76%"
+# Match lines like: "1 - AB23 456 of 1,234 registered voters = 98.76%"
+# Captured groups: ('1 - AB23', '456', '1,234', '98.76')
 precinct_pattern_general = re.compile(
     r"^(\d+\s*-\s*[A-Za-z0-9]+)\s+(\d{1,3}(?:,\d{3})*)\s+of\s+(\d{1,3}(?:,\d{3})*)\s+registered voters\s+=\s+(\d+\.\d{2})%$"
 )
+# Match lines like: "Precinct 123 (Ballots Cast: 456)""
+# Captured groups: ('123', '456')
+precinct_pattern_simple = re.compile(r'Precinct\s+(\d+)\s+\(Ballots Cast:\s*(\d{1,3}(?:,\d{3})*)\)', re.IGNORECASE)
+
 # Match lines like: "Cast Votes ... 12,345 67.89%"
 total_votes_pattern = re.compile(r"Cast Votes.*\s+(\d{1,3}(?:,\d{3})*)\s+\d+\.\d{2}%$")
 # Match lines like: "Overvotes: 0 0 0 123"
 over_votes_pattern = re.compile(
-    r"Overvotes:\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
+    r"(Overvotes|Over Votes):\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
 )
 undervotes_pattern = re.compile(
-    r"Undervotes:\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
+    r"(Undervotes|Under Votes):\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
 )
 # Pattern to extract vote and percent pairs
 vote_percent_pattern = re.compile(r"(\d{1,3}(?:,\d{3})*)\s+(\d+\.\d{2})%")
@@ -360,6 +368,42 @@ def save_data_to_csv(data, output_csv, append=True):
     gc.collect()
     return []
 
+def get_header_data(lines):
+    event_date = ''
+    event_type = '' 
+    county ='' 
+    total_ballots_cast = ''
+
+    for line in lines[:10]:
+        line = line.strip()
+        if date_pattern.match(line):
+            event_date = line
+        date_match = date_month_pattern.match(line)
+        if date_match:
+            event_date = date_match.group(1)
+        county_match = county_pattern.match(line)
+        if county_match:
+            county = county_match.group(1)
+        if line == "Ballots Cast" and lines.index(line) + 1 < len(
+            lines
+        ):
+            next_line = lines[lines.index(line) + 1].strip()
+            if next_line.isdigit():
+                total_ballots_cast = next_line
+        if "Registered Voters" in line and lines.index(
+            line
+        ) + 1 < len(lines):
+            next_line = lines[lines.index(line) + 1].strip()
+            match = ballots_cast_pattern.match(next_line)
+            if match:
+                total_ballots_cast = match.group(1)
+        if "Election" or "Elections" in line and "Precincts Reporting" not in line:
+            event_type = line
+        # if "Elections" in line and "Precincts Reporting" not in line:
+        #     current_event_type = line
+
+        return event_date, event_type, county, total_ballots_cast
+
 
 def process_page_range(pdf_path, page_range, header_data=None, current_file_count=None):
     data = []
@@ -399,30 +443,38 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                         extract_start = time.time()
                         text = page.extract_text()
                         lines = text.split("\n") if text else []
-                        for line in lines[:10]:
-                            line = line.strip()
-                            if date_pattern.match(line):
-                                current_event_date = line
-                            if county_pattern.match(line):
-                                current_county = line
-                            if line == "Ballots Cast" and lines.index(line) + 1 < len(
-                                lines
-                            ):
-                                next_line = lines[lines.index(line) + 1].strip()
-                                if next_line.isdigit():
-                                    current_total_ballots_cast = next_line
-                            if "Registered Voters" in line and lines.index(
-                                line
-                            ) + 1 < len(lines):
-                                next_line = lines[lines.index(line) + 1].strip()
-                                match = ballots_cast_pattern.match(next_line)
-                                if match:
-                                    current_total_ballots_cast = match.group(1)
-                            if "Election" in line and "Precincts Reporting" not in line:
-                                current_event_type = line
-                        logging.info(
-                            f"Page {page_num} text extraction took {time.time() - extract_start:.2f} seconds"
-                        )
+                    if not header_data:
+                        current_event_date, current_event_type, current_county, current_total_ballots_cast  = get_header_data(lines)
+
+                        # for line in lines[:10]:
+                        #     line = line.strip()
+                        #     if date_pattern.match(line):
+                        #         current_event_date = line
+                        #     date_match = date_month_pattern.match(line)
+                        #     if date_match:
+                        #         current_event_date = date_match.group(1)
+                        #     county_match = county_pattern.match(line)
+                        #     if county_match:
+                        #         current_county = county_match.group(1)
+                        #     if line == "Ballots Cast" and lines.index(line) + 1 < len(
+                        #         lines
+                        #     ):
+                        #         next_line = lines[lines.index(line) + 1].strip()
+                        #         if next_line.isdigit():
+                        #             current_total_ballots_cast = next_line
+                        #     if "Registered Voters" in line and lines.index(
+                        #         line
+                        #     ) + 1 < len(lines):
+                        #         next_line = lines[lines.index(line) + 1].strip()
+                        #         match = ballots_cast_pattern.match(next_line)
+                        #         if match:
+                        #             current_total_ballots_cast = match.group(1)
+                        #     if "Election" in line and "Precincts Reporting" not in line:
+                        #         current_event_type = line
+
+                        # logging.info(
+                        #     f"Page {page_num} text extraction took {time.time() - extract_start:.2f} seconds"
+                        # )
 
                     # Extract lines
                     extract_start = time.time()
@@ -513,6 +565,15 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                         if precinct_match_two:
                             current_precinct = precinct_match_two.group(1)
                             current_precinct_ballots = precinct_match_two.group(2)
+                            logging.info(
+                                f"Found precinct (alt: 2): {current_precinct}, ballots: {current_precinct_ballots}"
+                            )
+                            continue
+
+                        precinct_match_simple = precinct_pattern_simple.match(line)
+                        if precinct_match_simple:
+                            current_precinct = precinct_match_simple.group(1)
+                            current_precinct_ballots = precinct_match_simple.group(2)
                             logging.info(
                                 f"Found precinct (alt: 2): {current_precinct}, ballots: {current_precinct_ballots}"
                             )
@@ -755,27 +816,35 @@ def main():
                     first_page = pdf.pages[0]
                     text = first_page.extract_text()
                     lines = text.split("\n") if text else []
-                    for line in lines[:10]:
-                        line = line.strip()
-                        if date_pattern.match(line):
-                            header_data["event_date"] = line
-                        if county_pattern.match(line):
-                            header_data["county"] = line
-                        if line == "Ballots Cast" and lines.index(line) + 1 < len(
-                            lines
-                        ):
-                            next_line = lines[lines.index(line) + 1].strip()
-                            if next_line.isdigit():
-                                header_data["total_ballots_cast"] = next_line
-                        if "Registered Voters" in line and lines.index(line) + 1 < len(
-                            lines
-                        ):
-                            next_line = lines[lines.index(line) + 1].strip()
-                            match = ballots_cast_pattern.match(next_line)
-                            if match:
-                                header_data["total_ballots_cast"] = match.group(1)
-                        if "Election" in line and "Precincts Reporting" not in line:
-                            header_data["event_type"] = line
+
+                    event_date, event_type, county, total_ballots_cast  = get_header_data(lines)
+
+                    header_data["event_date"] = event_date
+                    header_data["event_type"] = event_type
+                    header_data["county"] = county
+                    header_data["total_ballots_cast"] = total_ballots_cast
+
+                    # for line in lines[:10]:
+                    #     line = line.strip()
+                    #     if date_pattern.match(line):
+                    #         header_data["event_date"] = line
+                    #     if county_pattern.match(line):
+                    #         header_data["county"] = line
+                    #     if line == "Ballots Cast" and lines.index(line) + 1 < len(
+                    #         lines
+                    #     ):
+                    #         next_line = lines[lines.index(line) + 1].strip()
+                    #         if next_line.isdigit():
+                    #             header_data["total_ballots_cast"] = next_line
+                    #     if "Registered Voters" in line and lines.index(line) + 1 < len(
+                    #         lines
+                    #     ):
+                    #         next_line = lines[lines.index(line) + 1].strip()
+                    #         match = ballots_cast_pattern.match(next_line)
+                    #         if match:
+                    #             header_data["total_ballots_cast"] = match.group(1)
+                    #     if "Election" in line and "Precincts Reporting" not in line:
+                    #         header_data["event_type"] = line
                     first_page.close()
 
                 logging.info(f"First paage processed: {header_data} ")
@@ -835,3 +904,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+

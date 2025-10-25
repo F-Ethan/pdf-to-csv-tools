@@ -12,7 +12,6 @@ import PyPDF2
 # settings
 input_folder = '../input'
 output_csv = "../output/extracted_data.csv"
-cast_pattern = re.compile(r'(?i)Cast Votes:\s+.+?\s+(\d{1,3}(?:,\d{3})*)\s+\d+\.\d+%$', re.IGNORECASE)
 
 # Create logs directory first
 os.makedirs('../logs', exist_ok=True)
@@ -109,6 +108,7 @@ for term in office_terms:
 
 
 # Patterns 
+cast_pattern = re.compile(r'(?i)Cast Votes:\s+.+?\s+(\d{1,3}(?:,\d{3})*)\s+\d+\.\d+%$', re.IGNORECASE)
 over_pattern = re.compile(r'(?i)Over Votes:\s+.+?\s+(\d+)\s+\d+\.\d+%$', re.IGNORECASE)
 # Replace the existing patterns
 precinct_pattern = re.compile(r'Precinct\s+(\d+)\s+\(Ballots Cast:\s*(\d{1,3}(?:,\d{3})*)\)', re.IGNORECASE)
