@@ -25,6 +25,7 @@ from functools import partial
 # Configuration
 in_development = True  # Set to True to process only the first 10 pages per PDF
 multi_thread = True
+regular_expresion = False # set to true to use office_terms() else it will check for "Vote for #" to flag office name
 input_folder = "../input"  # Update to your folder path
 output_csv = "../output/Election_Results.csv"
 debug_page_range = None  # Set to (start, end) for debugging, e.g., (600, 640)
@@ -113,6 +114,7 @@ office_terms = [
     "Commissioner",
     "Chair",
     "County Constable"
+    "Assessor"
 ]
 
 compiled_patterns = []
@@ -155,12 +157,22 @@ precinct_pattern_simple = re.compile(r'Precinct\s+(\d+)\s+\(Ballots Cast:\s*(\d{
 
 # Match lines like: "Cast Votes ... 12,345 67.89%"
 total_votes_pattern = re.compile(r"Cast Votes.*\s+(\d{1,3}(?:,\d{3})*)\s+\d+\.\d{2}%$")
+
 # Match lines like: "Overvotes: 0 0 0 123"
 over_votes_pattern = re.compile(
-    r"(Overvotes|Over Votes):\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
+    r"Overvotes:\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
 )
+# Match lines like: "Undervotes: 0 0 0 123"
 undervotes_pattern = re.compile(
-    r"(Undervotes|Under Votes):\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
+    r"Under Votes:\s+(?:\d{1,3}(?:,\d{3})*\s+)*(\d{1,3}(?:,\d{3})*)$"
+)
+# Matches "Over Votes: [vote %] [vote %] [vote %] [last_vote %]" → Captures last_vote (e.g., "1")
+over_votes_pattern_two = re.compile(
+    r"Over Votes:\s+(?:[\d,]+\s+\d+\.\d+%\s+)*([\d,]+)\s+\d+\.\d+%$"
+)
+# Matches "Under Votes: [vote %] [vote %] [vote %] [last_vote %]" → Captures last_vote (e.g., "50")
+undervotes_pattern_two = re.compile(
+    r"Under Votes:\s+(?:[\d,]+\s+\d+\.\d+%\s+)*([\d,]+)\s+\d+\.\d+%$"
 )
 # Pattern to extract vote and percent pairs
 vote_percent_pattern = re.compile(r"(\d{1,3}(?:,\d{3})*)\s+(\d+\.\d{2})%")
@@ -171,17 +183,24 @@ def extract_office_groups(text):
     Returns (prefix, term, suffix) for the first match, or None if no match.
     """
     logging.info(f"Checking line for Office Groups: {text}")
-    for pattern in compiled_patterns:
-        match = pattern.search(text)
+    if regular_expresion:
+        for pattern in compiled_patterns:
+            match = pattern.search(text)
+            if match:
+                prefix = match.group(1)
+                term_matched = match.group(2)
+                suffix = match.group(3)
+                return (prefix, term_matched, suffix)
+    else:
+        vote_for_pattern = re.compile(r"^.*(vote for [0-9]+)$", re.IGNORECASE)
+        match = vote_for_pattern.search(text)
         if match:
-            prefix = match.group(1)
-            term_matched = match.group(2)
-            suffix = match.group(3)
-            return (prefix, term_matched, suffix)
+            logging.info(f"found vote number in line: {text}")
+
+            return (match, "vote for", "number")
     return None
 
 
-# Function to parse candidate party (added 'W' for write-ins)
 def parse_candidate_line(line, current_file_count=None):
     """
     Parses a candidate line like:
@@ -190,8 +209,15 @@ def parse_candidate_line(line, current_file_count=None):
     Returns:
         candidate_name (str), candidate_party (str), results (List[Tuple[int, float]])
     """
-    # Extract everything before the first vote number
-    # This assumes candidate name + party come before vote/percent pairs
+    line = line.strip()
+    if not line:
+        return None
+
+    # Explicit exclusion for non-candidate summary lines (robust prefix check)
+    if re.match(r'^(Cast|Over|Under)\s+Votes:', line):
+        logging.error(f"Skipping non-candidate line: {line[:50]}...")
+        return None
+
     candidate_info_match = re.match(
         r"^(?!.*Cast Votes:)(.+?)\s+(?=\d{1,3}(?:,\d{3})*\s+\d+\.\d{2}%)", line
     )
@@ -201,7 +227,7 @@ def parse_candidate_line(line, current_file_count=None):
     candidate_info = candidate_info_match.group(1).strip()
 
     # Extract party from candidate_info using your original function's logic
-    candidate_groups_pattern = re.compile(r"^(.*)\s+(REP|DEM|LIB|GRE|IND|W)$")
+    candidate_groups_pattern = re.compile(r"^(.*)\s+.?(REP|DEM|LIB|GRE|IND|W).?$")
     candidate_groups = candidate_groups_pattern.match(candidate_info)
     if candidate_groups:
         candidate_name = candidate_groups.group(1).strip()
@@ -536,6 +562,15 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                                 f"Over votes for {current_contest}: {over_match.group(1)}"
                             )
                             continue
+                        over_match_two = over_votes_pattern_two.search(line)
+                        if over_match_two and current_contest:
+                            contest_summaries[current_contest]["over_votes"] = (
+                                over_match_two.group(1)
+                            )
+                            logging.info(
+                                f"Over votes for {current_contest}: {over_match_two.group(1)}"
+                            )
+                            continue
                         under_match = undervotes_pattern.search(line)
                         if under_match and current_contest:
                             contest_summaries[current_contest]["undervotes"] = (
@@ -543,6 +578,15 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                             )
                             logging.info(
                                 f"Under votes for {current_contest}: {under_match.group(1)}"
+                            )
+                            continue
+                        under_match_two = undervotes_pattern_two.search(line)
+                        if under_match_two and current_contest:
+                            contest_summaries[current_contest]["undervotes"] = (
+                                under_match_two.group(1)
+                            )
+                            logging.info(
+                                f"Under votes for {current_contest}: {under_match_two.group(1)}"
                             )
                             continue
                         precinct_match = precinct_pattern.match(line)
@@ -581,6 +625,8 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                     logging.info(
                         f"Page {page_num} regex processing took {time.time() - regex_start:.2f} seconds"
                     )
+
+                    print(contest_summaries)
 
                     # Second pass: Process candidates
                     for line in lines:
@@ -735,8 +781,8 @@ def main():
         print(f"File '{output_csv}' deleted successfully.")
     else:
         print(f"File '{output_csv}' does not exist.")
-    if os.path.exists("logs/pdf_extraction.log"):
-        os.remove("logs/pdf_extraction.log")
+    if os.path.exists("../logs/pdf_extraction.log"):
+        os.remove("../logs/pdf_extraction.log")
         print(f"File 'pdf_extraction.log' deleted successfully.")
     else:
         print(f"File 'pdf_extraction.log' does not exist.")
