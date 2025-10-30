@@ -14,32 +14,34 @@ from functools import partial
     This script is desinged to pull out and flatten all the data from a folder of
     precinct level PDF's and output all the information in a single CSV. 
     Set muti thread to ture for faster processing
-    set in_development to true to only process the frist 10 pages
-    batch_size, memory_limit_mb, system_memory_limit_mb are all there to keep the memory load down
+    set IN_DEVELOPMENT to true to only process the frist 10 pages
+    BATCH_SIZE, MEMORY_LIMIT_MB, SYSTEM_MEMORY_LIMIT_MB are all there to keep the memory load down
     however currently the latter two are not being checked as they didn't ever work properly
 
     Make sure to check the contest_pattern regex it may need changed before it will match with the offices in a new events. 
 
 """
 
+
 # Configuration
-in_development = True  # Set to True to process only the first 10 pages per PDF
-multi_thread = True
-regular_expresion = False # set to true to use office_terms() else it will check for "Vote for #" to flag office name
-input_folder = "../input"  # Update to your folder path
-output_csv = "../output/Election_Results.csv"
-debug_page_range = None  # Set to (start, end) for debugging, e.g., (600, 640)
-batch_size = 300  # Write to CSV every X pages (now per-file, not per-process)
-memory_limit_mb = 500  # Per-process memory limit in MB
-system_memory_limit_mb = (
+IN_DEVELOPMENT = True  # Set to True to process only the first 10 pages per PDF
+MULTI_THREAD = True
+REGULAR_EXPRESION = True # set to true to use office_terms() else it will check for "Vote for #" to flag office name
+INPUT_FOLDER = "../input"  # Update to your folder path
+OUTPUT_CSV = "../output/Election_Results.csv"
+DEBUG_PAGE_RANGE = None  # Set to (start, end) for debugging, e.g., (600, 640)
+BATCH_SIZE = 300  # Write to CSV every X pages (now per-file, not per-process)
+MEMORY_LIMIT_MB = 500  # Per-process memory limit in MB
+SYSTEM_MEMORY_LIMIT_MB = (
     8000  # System-wide used memory limit in MB (adjust based on your RAM)
 )
-party_by_file = False #[
-    # "",
-    # "Dem",
-    # "Rep",
-#]  # Set this to true it the Parties are sepperated by file
-current_file_count = None
+PARTY_BY_FILE = False #[
+#     "Dem",
+#     "Rep",
+# ]  # Set this to true it the Parties are sepperated by file
+CURRENT_FILE_COUNT = None
+SET_FIX_DATE = ''
+SET_FIX_BALLOTS_CAST = ''
 
 # Set up logging
 logging.basicConfig(
@@ -72,6 +74,7 @@ OUTPUT_HEADERS = [
     "County",
     "Raw Title",
     "Candidate Party",
+    "Contest Party",
 ]
 
 # Extracted and deduplicated list of office terms from the original regex
@@ -127,19 +130,46 @@ for term in office_terms:
 # (\d{1,3}(?:,\d{3})*)  -- this should match any number 1-999 and 1,000 + including the coma
 # (\d{1,3}(?:,\d{3})*|\d+) -- this will match with coma and without
 
+file_party_pattern = re.compile(r"(Dem|Rep)", re.IGNORECASE)
+
 date_pattern = re.compile(
     r"^(0[1-9]|1[0-2]|[1-9])\/([1-9]|0[1-9]|[12][0-9]|3[01])\/(19|20)\d{2}$"
 )
-date_month_pattern = re.compile(r"^.* — ([A-Z]+\s [0-9][0-9], [0-9][0-9][0-9][0-9])$", re.IGNORECASE)
+date_month_pattern = re.compile(r"^.*\s([A-Z]+\s[0-9][0-9],\s[0-9][0-9][0-9][0-9])$", re.IGNORECASE)
 ballots_cast_pattern = re.compile(r"^(\d+)\s+of\s+(\d+)\s+=\s+\d+\.\d{2}%$")
+election_type_pattern = re.compile(r"^.*\s[-—–]\s(.*election.*)\s[-—–].*", re.IGNORECASE)
+#Total Number of Voters : 632,587 of 1,134,484 = 55.76% Precincts Reporting 704 of 704 = 100.00%
+number_of_voters_patter = re.compile(r"Total Number of Voters\s*:\s+(\d{1,3}(?:,\d{3})*)")
 county_pattern = re.compile(r"^(.*?\s*County)(.*)", re.IGNORECASE)
 # contest_pattern = re.compile(
 #     r"^(.*\b(City|Proposition|Town|Village|School|Representative|Governor|General|Public|Municipal Utility|Supreme|Clerk|Attorney|Court|Board|Judge|Commissioner|Member|Justice|Lieutenant|Comptroller|Railroad|Senator|Criminal|Family|Probate|Peace|Library|Council|Independent|Councilmember|Trustee|District|Place)\b.*|Comptroller of Public Accounts|Commissioner of the General Land Office|Commissioner of Agriculture|Councilmember|Precinct Chair,.*|County Constable,.*)$"
 #     )
 
+
 # Match lines like: "123 456 ballots cast"
 precinct_pattern = re.compile(
     r"^(\d{1,3}(?:,\d{3})*|\d+\s+-\s+\d{1,3}(?:,\d{3})*|\d+)\s+(\d{1,3}(?:,\d{3})*|\d+)\s+ballots cast"
+)
+
+precinct_pattern_simple = re.compile(
+    r'''
+    ^                                   # start of line (for the short form)
+    (?:Precinct\s+)?                    # optional "Precinct " prefix
+    (
+        \d+ (?:\s*-\s*\d+)?             # precinct id: 123   OR   4650 - 008
+        (?:,\d{3})*                     # optional thousands commas (rare on precinct ids)
+    )
+    \s*                                 # any spacing
+    (?:\(Ballots\s+Cast:\s*             # --- long form -------------------------------------------------
+        (\d{1,3}(?:,\d{3})*)            # ballots cast (with commas)
+    \)\s*$
+     |
+        \s+                             # --- short form ------------------------------------------------
+        (\d{1,3}(?:,\d{3})*)            # ballots cast (with commas)
+        \s+ballots\s+cast
+    )
+    ''',
+    re.IGNORECASE | re.VERBOSE
 )
 
 #Match lines like: "1 456 of 1,234 registered voters = 98.76%"
@@ -153,7 +183,7 @@ precinct_pattern_general = re.compile(
 )
 # Match lines like: "Precinct 123 (Ballots Cast: 456)""
 # Captured groups: ('123', '456')
-precinct_pattern_simple = re.compile(r'Precinct\s+(\d+)\s+\(Ballots Cast:\s*(\d{1,3}(?:,\d{3})*)\)', re.IGNORECASE)
+# precinct_pattern_simple = re.compile(r'Precinct\s+(\d+)\s+.?\s?\(Ballots Cast:\s*(\d{1,3}(?:,\d{3})*)\)', re.IGNORECASE)
 
 # Match lines like: "Cast Votes ... 12,345 67.89%"
 total_votes_pattern = re.compile(r"Cast Votes.*\s+(\d{1,3}(?:,\d{3})*)\s+\d+\.\d{2}%$")
@@ -183,7 +213,7 @@ def extract_office_groups(text):
     Returns (prefix, term, suffix) for the first match, or None if no match.
     """
     logging.info(f"Checking line for Office Groups: {text}")
-    if regular_expresion:
+    if REGULAR_EXPRESION:
         for pattern in compiled_patterns:
             match = pattern.search(text)
             if match:
@@ -201,7 +231,7 @@ def extract_office_groups(text):
     return None
 
 
-def parse_candidate_line(line, current_file_count=None):
+def parse_candidate_line(line, CURRENT_FILE_COUNT=None):
     """
     Parses a candidate line like:
     'Eric Starnes REP 26 46.43% 749 58.88% 406 59.97% 1,181 58.90%'
@@ -235,8 +265,8 @@ def parse_candidate_line(line, current_file_count=None):
     else:
         candidate_name = candidate_info
         # if the candidates are seperated by file this will set the candidate party by the file count.
-        if party_by_file:
-            candidate_party = party_by_file[current_file_count]
+        if PARTY_BY_FILE:
+            candidate_party = PARTY_BY_FILE[CURRENT_FILE_COUNT]
         else:
             candidate_party = ""
             logging.warning(f"No party found for candidate: {candidate_info}")
@@ -282,16 +312,27 @@ def parse_contest_name(contest_name):
     else:
         hyphen_modifiers = []
         comma_modifiers = []
+
     
     # Combine all modifiers (as list, then join for string)
     all_modifiers = paren_modifiers + hyphen_modifiers + comma_modifiers
     office_modifier = " ".join(all_modifiers) if all_modifiers else ""
+
+    vote_for_pattern = re.compile(r'^.*vote for ([0-9]+)$', re.IGNORECASE)
+    vote_for_match = vote_for_pattern.match(contest_name)
+    if vote_for_match:
+        number_of_winners = vote_for_match.group(1)
+        
+    else:
+        number_of_winners = '1'
+
     
     # Clean the name: remove parens, hyphen-phrases, and comma-phrases
     # Note: We still remove all parens during cleaning, even excluded ones, to avoid them in clean_name
     clean_name = re.sub(r"\s*\([^)]*\)\s*", " ", contest_name)  # Remove all parens
     clean_name = re.sub(r"\s*-\s*(?:" + phrases_or + r")(?:\s|$)", "", clean_name, flags=re.IGNORECASE)  # Remove hyphen-phrases
     clean_name = re.sub(r"\s*,\s*(?:" + phrases_or + r")(?:\s|$)", "", clean_name, flags=re.IGNORECASE)  # Remove comma-phrases
+    clean_name = re.sub(r"\s*,\s*Vote For [0-9]+(?:\s|$)", "", clean_name, flags=re.IGNORECASE)
     clean_name = re.sub(r"\s+", " ", clean_name).strip()
     
     # clean_name = re.sub(r",\s*Place\s+[1-9][0-9]?\s*", " ", clean_name)
@@ -300,7 +341,7 @@ def parse_contest_name(contest_name):
     office = clean_name
     current_raw_office = contest_name
     
-    return office, district_name, district_type, office_modifier, current_raw_office
+    return office, district_name, district_type, office_modifier, current_raw_office, number_of_winners
     # if "City of" in clean_name:
     #     district_type = "City"
     #     parts = clean_name.split("City of", 1)
@@ -369,8 +410,8 @@ def group_words_into_lines(words):
 
 
 # save_data_to_csv (removed lock; now called only from main)
-def save_data_to_csv(data, output_csv, append=True):
-    logging.info(f"Attempting to save {len(data)} rows to {output_csv}")
+def save_data_to_csv(data, OUTPUT_CSV, append=True):
+    logging.info(f"Attempting to save {len(data)} rows to {OUTPUT_CSV}")
     start_time = time.time()
     if data:
         logging.info(
@@ -378,15 +419,15 @@ def save_data_to_csv(data, output_csv, append=True):
         )  # Log first row for verification
         print(f"Saving Data: {data[0]['Precinct Name']}")
         df = pd.DataFrame(data, columns=OUTPUT_HEADERS)
-        mode = "a" if append and os.path.exists(output_csv) else "w"
+        mode = "a" if append and os.path.exists(OUTPUT_CSV) else "w"
         df.to_csv(
-            output_csv,
+            OUTPUT_CSV,
             index=False,
             mode=mode,
-            header=not append or not os.path.exists(output_csv),
+            header=not append or not os.path.exists(OUTPUT_CSV),
         )
         logging.info(
-            f"Saved {len(data)} rows to {output_csv} in {time.time() - start_time:.2f} seconds"
+            f"Saved {len(data)} rows to {OUTPUT_CSV} in {time.time() - start_time:.2f} seconds"
         )
         del df
     else:
@@ -397,7 +438,7 @@ def save_data_to_csv(data, output_csv, append=True):
 def get_header_data(lines):
     event_date = ''
     event_type = '' 
-    county ='' 
+    county = '' 
     total_ballots_cast = ''
 
     for line in lines[:10]:
@@ -410,12 +451,15 @@ def get_header_data(lines):
         county_match = county_pattern.match(line)
         if county_match:
             county = county_match.group(1)
-        if line == "Ballots Cast" and lines.index(line) + 1 < len(
-            lines
-        ):
-            next_line = lines[lines.index(line) + 1].strip()
-            if next_line.isdigit():
-                total_ballots_cast = next_line
+        # if line == "Ballots Cast" and lines.index(line) + 1 < len(
+        #     lines
+        # ):
+        #     next_line = lines[lines.index(line) + 1].strip()
+        #     if next_line.isdigit():
+        #         total_ballots_cast = next_line
+        number_voters_match = number_of_voters_patter.match(line)
+        if number_voters_match:
+            total_ballots_cast = number_voters_match.group(1)
         if "Registered Voters" in line and lines.index(
             line
         ) + 1 < len(lines):
@@ -423,15 +467,19 @@ def get_header_data(lines):
             match = ballots_cast_pattern.match(next_line)
             if match:
                 total_ballots_cast = match.group(1)
-        if "Election" or "Elections" in line and "Precincts Reporting" not in line:
-            event_type = line
+
+        election_type_match = election_type_pattern.match(line)
+        if election_type_match:
+             event_type = election_type_match.group(1)
+        # if "Election" or "Elections" in line and "Precincts Reporting" not in line:
+        #     event_type = line
         # if "Elections" in line and "Precincts Reporting" not in line:
         #     current_event_type = line
 
-        return event_date, event_type, county, total_ballots_cast
+    return event_date, event_type, county, total_ballots_cast
 
 
-def process_page_range(pdf_path, page_range, header_data=None, current_file_count=None):
+def process_page_range(pdf_path, page_range, header_data=None, CURRENT_FILE_COUNT=None, contest_party=''):
     data = []
     pages_processed = 0
     try:
@@ -452,8 +500,11 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
             current_district_name = ""
             current_district_type = ""
             current_office_modifier = ""
+            current_vote_for = ""
             current_raw_office = ""
             current_contest = None
+            
+            
 
             for page_num in page_range:
                 start_time = time.time()  # start_time inside loop for per-page timing
@@ -525,7 +576,7 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                     if not lines:
                         logging.warning(f"No text extracted on page {page_num}")
                         continue
-                    if in_development or page_num % 1000 == 0:
+                    if IN_DEVELOPMENT or page_num % 1000 == 0:
                         logging.info(f"Extracted lines on page {page_num}: {lines}")
 
                     # First pass: Collect summary data (unchanged)
@@ -626,7 +677,7 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                         f"Page {page_num} regex processing took {time.time() - regex_start:.2f} seconds"
                     )
 
-                    print(contest_summaries)
+                    # print(contest_summaries)
 
                     # Second pass: Process candidates
                     for line in lines:
@@ -642,6 +693,7 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                                 current_district_type,
                                 current_office_modifier,
                                 current_raw_office,
+                                current_vote_for
                             ) = parse_contest_name(line)
                             current_contest = line
                             logging.info(
@@ -654,7 +706,7 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                                 f"Candidate line without precinct set: {line}"
                             )
                         parsed = parse_candidate_line(
-                            line, current_file_count=current_file_count
+                            line, CURRENT_FILE_COUNT=CURRENT_FILE_COUNT
                         )
                         if parsed:
                             candidate, current_candidate_party, results = parsed
@@ -705,7 +757,7 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                                 continue
                             for channel, votes in vote_channels.items():
                                 row = {
-                                    "Event Date": current_event_date or "N/A",
+                                    "Event Date": current_event_date or SET_FIX_DATE,
                                     "Event Type": current_event_type or "N/A",
                                     "Precinct Name": current_precinct or "N/A",
                                     "Vote Channel": channel,
@@ -716,15 +768,15 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
                                     "District Type": current_district_type,
                                     "Office": current_office,
                                     "Office Modifier": current_office_modifier,
-                                    "# of winners": "1",
-                                    "Total Ballots Cast": current_total_ballots_cast
-                                    or "N/A",
+                                    "# of winners": current_vote_for or "1",
+                                    "Total Ballots Cast": current_total_ballots_cast or SET_FIX_BALLOTS_CAST,
                                     "Over Votes": over_votes,
                                     "Undervotes": undervotes,
                                     "Ballots Cast": current_precinct_ballots,
                                     "County": current_county or '',
                                     "Raw Title": current_raw_office,
                                     "Candidate Party": current_candidate_party,
+                                    'Contest Party': contest_party
                                 }
                                 data.append(row)
                                 logging.info(
@@ -772,15 +824,15 @@ def process_page_range(pdf_path, page_range, header_data=None, current_file_coun
 # Main processing function
 def main():
     pdf_files = [
-        os.path.join(input_folder, f)
-        for f in os.listdir(input_folder)
+        os.path.join(INPUT_FOLDER, f)
+        for f in os.listdir(INPUT_FOLDER)
         if f.lower().endswith(".pdf")
     ]
-    if os.path.exists(output_csv):
-        os.remove(output_csv)
-        print(f"File '{output_csv}' deleted successfully.")
+    if os.path.exists(OUTPUT_CSV):
+        os.remove(OUTPUT_CSV)
+        print(f"File '{OUTPUT_CSV}' deleted successfully.")
     else:
-        print(f"File '{output_csv}' does not exist.")
+        print(f"File '{OUTPUT_CSV}' does not exist.")
     if os.path.exists("../logs/pdf_extraction.log"):
         os.remove("../logs/pdf_extraction.log")
         print(f"File 'pdf_extraction.log' deleted successfully.")
@@ -793,17 +845,24 @@ def main():
     file_index = 0
     append_to_csv = False  # Start with False to write headers
     for pdf_path in pdf_files:
+        contest_party = ''
+        print(pdf_path)
+        file_party_match = file_party_pattern.search(pdf_path)
+        if file_party_match:
+            contest_party = file_party_match.group(1)
+            print(f"Files name processed: {contest_party}")
+
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                max_pages = 10 if in_development else len(pdf.pages)
+                max_pages = 10 if IN_DEVELOPMENT else len(pdf.pages)
                 print("start of it all")
-                if debug_page_range:
-                    start, end = debug_page_range
+                if DEBUG_PAGE_RANGE:
+                    start, end = DEBUG_PAGE_RANGE
                     page_range_sum = end - start
-                    processes = cpu_count() if multi_thread else 1
+                    processes = cpu_count() if MULTI_THREAD else 1
                     chunk_size = (
                         max_pages
-                        if not multi_thread
+                        if not MULTI_THREAD
                         else page_range_sum // processes + 1
                     )
                     # page_ranges = [
@@ -813,18 +872,18 @@ def main():
                         range(i, min(i + chunk_size, end + 1))
                         for i in range(start, end + 1, chunk_size)
                     ]
-                    print("debug_page_range active")
+                    print("DEBUG_PAGE_RANGE active")
                 else:
-                    # processes = cpu_count() if multi_thread else 1
-                    # chunk_size = max_pages if not multi_thread else max_pages // processes + 1
+                    # processes = cpu_count() if MULTI_THREAD else 1
+                    # chunk_size = max_pages if not MULTI_THREAD else max_pages // processes + 1
                     # page_ranges = [range(i + 1, min(i + chunk_size + 1, max_pages + 1)) for i in range(0, max_pages, chunk_size)]
                     # print("getting groups ready")
 
                     group_count = 8
-                    processes = cpu_count() if multi_thread else 1
+                    processes = cpu_count() if MULTI_THREAD else 1
                     precinct_starts = (
                         [p for p in range(1, max_pages + 1) if p % processes == 1]
-                        if multi_thread
+                        if MULTI_THREAD
                         else [1]
                     )
 
@@ -870,27 +929,6 @@ def main():
                     header_data["county"] = county
                     header_data["total_ballots_cast"] = total_ballots_cast
 
-                    # for line in lines[:10]:
-                    #     line = line.strip()
-                    #     if date_pattern.match(line):
-                    #         header_data["event_date"] = line
-                    #     if county_pattern.match(line):
-                    #         header_data["county"] = line
-                    #     if line == "Ballots Cast" and lines.index(line) + 1 < len(
-                    #         lines
-                    #     ):
-                    #         next_line = lines[lines.index(line) + 1].strip()
-                    #         if next_line.isdigit():
-                    #             header_data["total_ballots_cast"] = next_line
-                    #     if "Registered Voters" in line and lines.index(line) + 1 < len(
-                    #         lines
-                    #     ):
-                    #         next_line = lines[lines.index(line) + 1].strip()
-                    #         match = ballots_cast_pattern.match(next_line)
-                    #         if match:
-                    #             header_data["total_ballots_cast"] = match.group(1)
-                    #     if "Election" in line and "Precincts Reporting" not in line:
-                    #         header_data["event_type"] = line
                     first_page.close()
 
                 logging.info(f"First paage processed: {header_data} ")
@@ -902,7 +940,8 @@ def main():
                             process_page_range,
                             pdf_path,
                             header_data=header_data,
-                            current_file_count=file_index,
+                            CURRENT_FILE_COUNT=file_index,
+                            contest_party=contest_party,
                         ),
                         [(pr,) for pr in page_ranges],
                     )
@@ -913,12 +952,12 @@ def main():
                     logging.info(f"Collected {len(all_data)} rows from all page ranges")
                     if all_data:
                         # Optional: Save in batches if very large
-                        for i in range(0, len(all_data), batch_size):
-                            batch = all_data[i:i + batch_size]
-                            save_data_to_csv(batch, output_csv, append=append_to_csv)
+                        for i in range(0, len(all_data), BATCH_SIZE):
+                            batch = all_data[i:i + BATCH_SIZE]
+                            save_data_to_csv(batch, OUTPUT_CSV, append=append_to_csv)
                             append_to_csv = True  # After first batch, append
                         print(
-                            f"CSV file '{output_csv}' updated with {len(all_data)} rows from {pdf_path}!"
+                            f"CSV file '{OUTPUT_CSV}' updated with {len(all_data)} rows from {pdf_path}!"
                         )
                     else:
                         print(
